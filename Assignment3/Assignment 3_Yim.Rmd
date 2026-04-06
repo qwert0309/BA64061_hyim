@@ -1,0 +1,322 @@
+---
+title: "Assignment 3"
+author: "Brian Yim"
+date: "2026-04-05"
+output:
+  html_document: default
+  word_document: default
+---
+
+#For this timeseries assignment I used jena_climate_2009_2016.csv dataset. 
+
+
+
+
+```{r}
+library(keras3)
+library(tensorflow)
+library(tidyverse)
+```
+
+
+```{r}
+# Load data
+data <- read.csv("C:/Users/hyim/OneDrive - Kent State University/Desktop/Advanced Machine Learning/jena_climate_2009_2016.csv")
+head(data)
+str(data)
+```
+#Next, I converted the data
+```{r}
+data$Date.Time <- as.POSIXct(data$Date.Time, format = "%d.%m.%Y %H:%M:%S")
+```
+
+#Next, I selected 4 items "temp", "humidity", "wind", "pressure" for the assignment
+```{r}
+data_numeric <- data %>%
+  select(
+    T..degC.,     # temperature (target)
+    rh....,       # humidity
+    wv..m.s.,     # wind speed
+    p..mbar.      # pressure
+  )
+```
+
+#And then, renamed them
+```{r}
+colnames(data_numeric) <- c("temp", "humidity", "wind", "pressure")
+```
+
+#Next, I split them into tain (50%), validate (25%), and test (25%) dataset
+```{r}
+n <- nrow(data_numeric)
+
+train_end <- floor(0.5 * n)
+val_end   <- floor(0.75 * n)
+
+train_data <- data_numeric[1:train_end, ]
+val_data   <- data_numeric[(train_end + 1):val_end, ]
+test_data  <- data_numeric[(val_end + 1):n, ]
+```
+
+#to move forward, I normalized them
+```{r}
+train_mean <- apply(train_data, 2, mean)
+train_sd   <- apply(train_data, 2, sd)
+
+train_scaled <- scale(train_data, center = train_mean, scale = train_sd)
+val_scaled   <- scale(val_data, center = train_mean, scale = train_sd)
+test_scaled  <- scale(test_data, center = train_mean, scale = train_sd)
+```
+
+#The current timeseries in in 10 minutes which is quite frequent hence too dense. So I selected every 6 rows meaning I am analyzing every hour
+```{r}
+sampling_rate <- 6
+
+train_scaled <- train_scaled[seq(1, nrow(train_scaled), by = sampling_rate), ]
+val_scaled   <- val_scaled[seq(1, nrow(val_scaled), by = sampling_rate), ]
+test_scaled  <- test_scaled[seq(1, nrow(test_scaled), by = sampling_rate), ]
+```
+
+#Next, I created the sequence. Past 120 time steps (~5 days) to predict next temp
+```{r}
+sequence_length <- 120
+target_col <- 1
+batch_size <- 32
+```
+
+#Then created the dataset
+```{r}
+train_ds <- timeseries_dataset_from_array(
+  data = train_scaled[1:(nrow(train_scaled) - 1), ],
+  targets = train_scaled[(sequence_length + 1):nrow(train_scaled), target_col],
+  sequence_length = sequence_length,
+  batch_size = batch_size
+)
+
+val_ds <- timeseries_dataset_from_array(
+  data = val_scaled[1:(nrow(val_scaled) - 1), ],
+  targets = val_scaled[(sequence_length + 1):nrow(val_scaled), target_col],
+  sequence_length = sequence_length,
+  batch_size = batch_size
+)
+
+test_ds <- timeseries_dataset_from_array(
+  data = test_scaled[1:(nrow(test_scaled) - 1), ],
+  targets = test_scaled[(sequence_length + 1):nrow(test_scaled), target_col],
+  sequence_length = sequence_length,
+  batch_size = batch_size
+)
+```
+#GRU baseline Model
+```{r}
+num_features <- ncol(train_scaled)
+
+model_gru <- keras_model_sequential() %>%
+  layer_gru(
+    units = 32,
+    input_shape = c(sequence_length, num_features),
+    dropout = 0.2,
+    recurrent_dropout = 0.2
+  ) %>%
+  layer_dense(units = 1)
+
+model_gru %>% compile(
+  optimizer = "rmsprop",
+  loss = "mse",
+  metrics = c("mae")
+)
+
+history_gru <- model_gru %>% fit(
+  train_ds,
+  validation_data = val_ds,
+  epochs = 20
+)
+```
+
+```{r}
+callbacks_list <- list(
+  callback_early_stopping(
+    monitor = "val_mae",
+    patience = 5,
+    restore_best_weights = TRUE
+  )
+)
+```
+
+
+#Next model is stacked GRU model
+```{r}
+model_stacked_gru <- keras_model_sequential() %>%
+  layer_gru(
+    units = 32,
+    return_sequences = TRUE,
+    input_shape = c(sequence_length, num_features),
+    dropout = 0.2,
+    recurrent_dropout = 0.2
+  ) %>%
+  layer_gru(
+    units = 32,
+    dropout = 0.2,
+    recurrent_dropout = 0.2
+  ) %>%
+  layer_dense(units = 1)
+
+model_stacked_gru %>% compile(
+  optimizer = "rmsprop",
+  loss = "mse",
+  metrics = c("mae")
+)
+
+history_stacked_gru <- model_stacked_gru %>% fit(
+  train_ds,
+  validation_data = val_ds,
+  epochs = 20,
+  callbacks = callbacks_list
+)
+```
+#Next, I ran LSTM
+```{r}
+model_lstm <- keras_model_sequential() %>%
+  layer_lstm(
+    units = 32,
+    input_shape = c(sequence_length, num_features),
+    dropout = 0.2,
+    recurrent_dropout = 0.2
+  ) %>%
+  layer_dense(units = 1)
+
+model_lstm %>% compile(
+  optimizer = "rmsprop",
+  loss = "mse",
+  metrics = c("mae")
+)
+
+history_lstm <- model_lstm %>% fit(
+  train_ds,
+  validation_data = val_ds,
+  epochs = 20,
+  callbacks = callbacks_list
+)
+```
+#Conv1D + GRU Model
+```{r}
+model_conv_gru <- keras_model_sequential() %>%
+  layer_conv_1d(
+    filters = 32,
+    kernel_size = 5,
+    activation = "relu",
+    input_shape = c(sequence_length, num_features)
+  ) %>%
+  layer_max_pooling_1d(pool_size = 2) %>%
+  layer_gru(
+    units = 32,
+    dropout = 0.2,
+    recurrent_dropout = 0.2
+  ) %>%
+  layer_dense(units = 1)
+
+model_conv_gru %>% compile(
+  optimizer = "rmsprop",
+  loss = "mse",
+  metrics = c("mae")
+)
+
+history_conv_gru <- model_conv_gru %>% fit(
+  train_ds,
+  validation_data = val_ds,
+  epochs = 20,
+  callbacks = callbacks_list
+)
+```
+
+#Next, I compared the model. Extract the best validation MAE for each model.
+```{r}
+get_best_val_mae <- function(history_object) {
+  min(as.numeric(history_object$metrics$val_mae))
+}
+```
+
+#Create a table
+```{r}
+results <- tibble(
+  Model = c("Baseline GRU", "Stacked GRU", "LSTM", "Conv1D + GRU"),
+  Best_Val_MAE = c(
+    get_best_val_mae(history_gru),
+    get_best_val_mae(history_stacked_gru),
+    get_best_val_mae(history_lstm),
+    get_best_val_mae(history_conv_gru)
+  )
+) %>%
+  arrange(Best_Val_MAE)
+
+results
+```
+
+#Finding the best model
+```{r}
+best_model_name <- results$Model[1]
+best_model_name
+```
+#Next, assign the actual model object
+```{r}
+best_model <- switch(
+  best_model_name,
+  "Baseline GRU" = model_gru,
+  "Stacked GRU" = model_stacked_gru,
+  "LSTM" = model_lstm,
+  "Conv1D + GRU" = model_conv_gru
+)
+```
+
+
+#Evaluate the best model on the test set
+```{r}
+test_results <- best_model %>% evaluate(test_ds)
+test_results
+```
+#Add test MAE to the results table
+```{r}
+results$Test_MAE <- NA
+results$Test_MAE[results$Model == best_model_name] <- as.numeric(test_results["mae"])
+
+results
+```
+
+#Create a graph
+```{r}
+ggplot(results, aes(x = reorder(Model, Best_Val_MAE), y = Best_Val_MAE)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Best Validation MAE by Model",
+    x = "Model",
+    y = "Best Validation MAE"
+  ) +
+  theme_minimal()
+```
+#save it
+```{r}
+ggsave("assignment3_model_comparison.png", width = 8, height = 5)
+```
+
+#plot training history
+```{r}
+plot(history_gru)
+plot(history_stacked_gru)
+plot(history_lstm)
+plot(history_conv_gru)
+```
+
+#save the results table
+```{r}
+write.csv(results, "assignment3_results.csv", row.names = FALSE)
+```
+
+
+#Convert MAE back
+```{r}
+temp_sd <- train_sd[1]
+final_test_mae_original_units <- 0.1507215 * temp_sd
+final_test_mae_original_units
+```
+
