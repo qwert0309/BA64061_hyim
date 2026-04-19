@@ -1,0 +1,248 @@
+---
+title: 'Assignment 4: Text and Sequence Data'
+author: "Brian Yim"
+date: "2026-04-18"
+output:
+  word_document: default
+  html_document: default
+---
+
+
+```{r}
+library(keras3)
+library(tensorflow)
+library(reticulate)
+library(tidyverse)
+```
+#loading the data
+```{r}
+max_features <- 10000
+maxlen <- 150
+
+imdb <- dataset_imdb(num_words = max_features)
+
+c(c(x_train, y_train), c(x_test, y_test)) %<-% imdb
+```
+#restricting training data and validation data
+```{r}
+set.seed(123)
+
+x_val <- x_train[1:10000]
+partial_x_train <- x_train[10001:(10000 + 100)]
+
+y_val <- y_train[1:10000]
+partial_y_train <- y_train[10001:(10000 + 100)]
+```
+
+#Pad sequences so every review has length 150
+```{r}
+x_val <- pad_sequences(x_val, maxlen = maxlen)
+partial_x_train <- pad_sequences(partial_x_train, maxlen = maxlen)
+x_test <- pad_sequences(x_test, maxlen = maxlen)
+```
+
+#now I build model 1 which is regular embedding model
+```{r}
+build_embedding_model <- function() {
+  model <- keras_model_sequential() |>
+    layer_embedding(input_dim = max_features, output_dim = 16, input_length = maxlen) |>
+    layer_flatten() |>
+    layer_dense(units = 16, activation = "relu") |>
+    layer_dense(units = 1, activation = "sigmoid")
+
+  model |> compile(
+    optimizer = "rmsprop",
+    loss = "binary_crossentropy",
+    metrics = "accuracy"
+  )
+
+  model
+}
+```
+
+#train this model
+```{r}
+model_embed <- build_embedding_model()
+
+history_embed <- model_embed |> fit(
+  partial_x_train,
+  partial_y_train,
+  epochs = 20,
+  batch_size = 32,
+  validation_data = list(x_val, y_val),
+  verbose = 2
+)
+```
+
+```{r}
+plot(history_embed)
+```
+
+#I downloaded pretrained word vector glove.6B.100d. Then I got the IMDB word index
+```{r}
+word_index <- dataset_imdb_word_index()
+word_index <- lapply(word_index, function(x) x + 3)
+word_index["[PAD]"] <- 0
+word_index["[START]"] <- 1
+word_index["[UNK]"] <- 2
+word_index["[UNUSED]"] <- 3
+```
+
+#read the glove.6B.100d.txt
+```{r}
+embeddings_index <- new.env(hash = TRUE)
+
+lines <- readLines("glove.6B.100d.txt")
+
+for (line in lines) {
+  values <- strsplit(line, " ")[[1]]
+  word <- values[1]
+  coefs <- as.numeric(values[-1])
+  embeddings_index[[word]] <- coefs
+}
+```
+
+#created the matrix
+```{r}
+embedding_dim <- 100
+embedding_matrix <- matrix(0, nrow = max_features, ncol = embedding_dim)
+
+for (word in names(word_index)) {
+  index <- word_index[[word]]
+  if (index < max_features) {
+    embedding_vector <- embeddings_index[[word]]
+    if (!is.null(embedding_vector)) {
+      embedding_matrix[index + 1, ] <- embedding_vector
+    }
+  }
+}
+```
+
+
+#Then, the pretrained embedding model was built
+```{r}
+build_pretrained_model <- function(embedding_matrix) {
+  model <- keras_model_sequential() |>
+    layer_embedding(
+      input_dim = max_features,
+      output_dim = embedding_dim,
+      input_length = maxlen,
+      weights = list(embedding_matrix),
+      trainable = FALSE
+    ) |>
+    layer_flatten() |>
+    layer_dense(units = 16, activation = "relu") |>
+    layer_dense(units = 1, activation = "sigmoid")
+
+  model |> compile(
+    optimizer = "rmsprop",
+    loss = "binary_crossentropy",
+    metrics = "accuracy"
+  )
+
+  model
+}
+```
+
+#trained this model
+```{r}
+model_pretrained <- build_pretrained_model(embedding_matrix)
+
+history_pretrained <- model_pretrained |> fit(
+  partial_x_train,
+  partial_y_train,
+  epochs = 20,
+  batch_size = 32,
+  validation_data = list(x_val, y_val),
+  verbose = 2
+)
+```
+
+#then, compared the two models
+```{r}
+best_embed <- max(history_embed$metrics$val_accuracy)
+best_pretrained <- max(history_pretrained$metrics$val_accuracy)
+
+results_100 <- data.frame(
+  training_samples = 100,
+  model = c("Learned Embedding", "Pretrained Embedding"),
+  best_val_accuracy = c(best_embed, best_pretrained)
+)
+
+results_100
+```
+
+#Next, I will compare different training size (100, 500, 1000, 2500, 5000)
+```{r}
+run_experiment <- function(n_train, x_train, y_train, x_val, y_val, embedding_matrix) {
+  
+  partial_x_train <- x_train[10001:(10000 + n_train)]
+  partial_y_train <- y_train[10001:(10000 + n_train)]
+  
+  partial_x_train <- pad_sequences(partial_x_train, maxlen = maxlen)
+  
+  # Learned embedding model
+  model_embed <- build_embedding_model()
+  history_embed <- model_embed |> fit(
+    partial_x_train,
+    partial_y_train,
+    epochs = 20,
+    batch_size = 32,
+    validation_data = list(x_val, y_val),
+    verbose = 0
+  )
+  
+  best_embed <- max(history_embed$metrics$val_accuracy)
+  
+  # Pretrained embedding model
+  model_pretrained <- build_pretrained_model(embedding_matrix)
+  history_pretrained <- model_pretrained |> fit(
+    partial_x_train,
+    partial_y_train,
+    epochs = 20,
+    batch_size = 32,
+    validation_data = list(x_val, y_val),
+    verbose = 0
+  )
+  
+  best_pretrained <- max(history_pretrained$metrics$val_accuracy)
+  
+  data.frame(
+    training_samples = n_train,
+    learned_embedding = best_embed,
+    pretrained_embedding = best_pretrained
+  )
+}
+```
+
+```{r}
+sample_sizes <- c(100, 500, 1000, 2500, 5000)
+
+all_results <- lapply(sample_sizes, run_experiment,
+                      x_train = x_train,
+                      y_train = y_train,
+                      x_val = x_val,
+                      y_val = y_val,
+                      embedding_matrix = embedding_matrix)
+
+all_results <- bind_rows(all_results)
+all_results
+```
+
+```{r}
+results_long <- all_results |>
+  pivot_longer(cols = c(learned_embedding, pretrained_embedding),
+               names_to = "model",
+               values_to = "best_val_accuracy")
+
+ggplot(results_long, aes(x = training_samples, y = best_val_accuracy, color = model)) +
+  geom_line() +
+  geom_point(size = 2) +
+  labs(
+    title = "Validation Accuracy by Training Sample Size",
+    x = "Training Sample Size",
+    y = "Best Validation Accuracy"
+  ) +
+  theme_minimal()
+```
+
